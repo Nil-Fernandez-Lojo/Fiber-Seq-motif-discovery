@@ -14,7 +14,7 @@ def load_genome(fasta_file):
 		if line[0] == ">":
 			sequences_name.append(line[1:-1])
 			if (chr_number!=0): sequences.append(my_seq)
-			my_seq = line
+			my_seq = ''
 			chr_number+=1
 		else:
 			my_seq+=line[:-1]
@@ -53,7 +53,6 @@ def load_bed_file(bed_file,chr_names):
 	 	methyl_rel_pos[n_methyl[i]:n_methyl[i+1]] = np.array(list(map(int,line_split[11].split(","))),dtype=int)
 	f.close()
 	return input_dat,n_methyl,methyl_rel_pos
-
 
 #### Process data for NN
 def seq_to_1_hot(seq):
@@ -105,13 +104,12 @@ def generator_data(seq_pos,n_methyl,methyl_rel_pos, chr_seq,augmentation_value,b
 			i+=1
 
 			if(i%batch_size == 0):
-				yield batch_input, batch_output
+				yield (batch_input, batch_output)
 				i=0
 				batch_input = np.zeros((batch_size, input_length, 4))
 				batch_output = np.zeros((batch_size,output_length))
 
 def break_reads_to_fixed_size(seq_pos,n_methyl,methyl_rel_pos,fixed_size):
-	
 	n_samples = np.sum(np.floor((seq_pos[:,2]-seq_pos[:,1])/fixed_size).astype('int32'))
 	seq_pos_new = np.zeros((n_samples,3), dtype=int)
 	n_methyl_new =  np.zeros(n_samples+1, dtype=int) 
@@ -142,17 +140,29 @@ def break_reads_to_fixed_size(seq_pos,n_methyl,methyl_rel_pos,fixed_size):
 	return seq_pos_new,n_methyl_new,methyl_rel_pos_new
 
 def shuffle_data(seq_pos,n_methyl,methyl_rel_pos):
-	#This function still needs to be tested
 	permutation = np.random.permutation(len(seq_pos))
-	
+
 	seq_pos_new = seq_pos[permutation,:]
-	n_methyl_new = np.zeros((n_methyl,3), dtype=int)
+	n_methyl_new = np.zeros(len(n_methyl), dtype=int)
 	methyl_rel_pos_new = np.zeros(len(methyl_rel_pos), dtype=int)
+	
 	for i in range(len(seq_pos)):
 		n_methyl_new[i+1] = n_methyl_new[i]+n_methyl[permutation[i]+1]- n_methyl[permutation[i]]
-		methyl_rel_pos_new[n_methyl_new[i]:n_methyl_new[i+1]] = methyl_rel_pos[n_methyl[i]:n_methyl[i+1]] 
+		methyl_rel_pos_new[n_methyl_new[i]:n_methyl_new[i+1]] = methyl_rel_pos[n_methyl[permutation[i]]:n_methyl[permutation[i]+1]] 
 
 	return seq_pos_new,n_methyl_new,methyl_rel_pos_new
 
-# test shuffle_data
-# split training and testing 
+def split_training_testing(seq_pos,n_methyl,methyl_rel_pos,fraction_training):
+	n_training = round(fraction_training*len(seq_pos))
+	
+	seq_pos_training = seq_pos[:n_training,:]
+	seq_pos_testing = seq_pos[n_training:,:]
+	
+	n_methyl_training = n_methyl[:n_training+1]
+	n_methyl_testing = n_methyl[n_training:]-n_methyl[n_training]
+
+	methyl_rel_pos_training = methyl_rel_pos[:n_methyl[n_training]]
+	methyl_rel_pos_testing = methyl_rel_pos[n_methyl[n_training]:]
+
+	return seq_pos_training,n_methyl_training,methyl_rel_pos_training, seq_pos_testing,n_methyl_testing,methyl_rel_pos_testing
+
