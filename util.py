@@ -1,8 +1,13 @@
 import numpy as np
-import matplotlib.pyplot as plt
 
 base_to_int_map = {'a' : 0, 'A' : 0, 't': 1, 'T':1, 'g' : 2, 'G' : 2, 'c' : 3, 'C' : 3, 'n' : -1, 'N': -1}
 complement_map = np.array([1,0,3,2])
+
+def write_chr_size(chr_names,chr_seq,file_name):
+	f=open(file_name, 'w')
+	for chr_idx in range(len(chr_names)):
+		f.write(chr_names[chr_idx] + '\t' + str(len(chr_seq[chr_idx]))+'\n')
+	f.close()
 
 #### Functions to read the data
 def load_genome(fasta_file):
@@ -106,6 +111,7 @@ def load_bed_file_peaks(bed_file,chr_names,chr_seq):
 		data[i,1] = int(line_split[1]) #start
 		data[i,2] = int(line_split[2]) #end
 	return data
+	f.close()
 
 def histogram_fraction_methylated_A_vs_T_per_read(bed_file,chr_names,chr_seq):
 
@@ -174,6 +180,58 @@ def get_average_profile(seq_pos,n_methyl,methyl_rel_pos, chr_seq):
 	coverage = coverage_forward + coverage_backward
 
 	return methyl_profile, coverage
+
+def smooth_average_profile(profile,chr_names,chr_seq,w):
+	#w is the number of A or T that will be used for the moving average on each side of the window
+	#The G and C will be given an accesibility profile equal to the nearest A or T on their right
+
+	#The first w and last w A/T bases will be given a smoothed profile of 0, I should change that
+	w = int(w)
+	smoothed_profile = np.zeros(len(profile))
+	a = 'aAtT'
+	start_pos_abs_chr = 0
+	for chr_idx in range(len(chr_names)):
+		counter_AT = 0
+		pos = np.zeros(2*w+1, dtype = int)
+		for j in range(len(chr_seq[chr_idx])):
+			if chr_seq[chr_idx][j] in a:
+				if (counter_AT < 2*w+1):
+					pos[counter_AT] = start_pos_abs_chr + j
+					counter_AT +=1
+				else:
+					pos = np.roll(pos, -1)
+					pos[2*w] = start_pos_abs_chr + j
+					counter_AT +=1
+
+				if (counter_AT>= 2*w+1): 
+					smoothed_profile[pos[w]:pos[w+1]] = np.sum(profile[pos])/(2*w+1)
+			if j>= len(profile) : break
+		if j>= len(profile) : break
+		start_pos_abs_chr += len(chr_seq[chr_idx])
+	return smoothed_profile
+
+def split_average_profile_with_peaks_to_fixed_size_inputs(profile, chr_seq,peaks,w):
+	x = np.zeros((len(peaks),3), dtype = int)
+	y = np.zeros((len(peaks),2*w+1))
+	
+	chr_length_cum = np.zeros(len(chr_seq)+1, dtype = int)
+	for chr_idx in range(len(chr_seq)):
+		chr_length_cum[chr_idx+1] = chr_length_cum[chr_idx] + len(chr_seq[chr_idx])
+
+	x[:,0] = peaks[:,0]
+	mid = np.round((peaks[:,2] + peaks[:,1])/2)
+	x[:,1] = mid-w
+	x[:,2] = mid+w+1
+
+	for i in range(len(peaks)):
+		#print((chr_length_cum[x[i,0]]+x[i,1]),(chr_length_cum[x[i,0]]+x[i,2]), 2*w+1)
+		y[i,:] = profile[(chr_length_cum[x[i,0]]+x[i,1]):(chr_length_cum[x[i,0]]+x[i,2])]
+
+	return x,y
+
+def get_mu_and_std_average_profile_peaks(y):
+	y = y.flatten()
+	return np.mean(y), np.std(y)
 
 #### Process data for NN
 def seq_to_1_hot(seq,strand):
@@ -252,6 +310,46 @@ def generator_data(seq_pos,n_methyl,methyl_rel_pos, chr_seq,augmentation_value,b
 				batch_input = np.zeros((batch_size, input_length, 4))
 				batch_output = np.zeros((batch_size,output_length))
 
+def generator_data_average_profile(x,y,chr_seq,augmentation_value,batch_size):
+	output_length = x[0,2] - x[0,1]
+	input_length = output_length+2*augmentation_value
+	batch_input = np.zeros((batch_size, input_length, 4))
+	batch_output = np.zeros((batch_size,output_length))
+	i = 0
+	while True:
+		for read_number in range(len(x)): #The reads should have been shuffled prior to this operation!
+			chr_indx = x[read_number,0]
+			read_s = x[read_number,1]
+			read_e = x[read_number,2]
+
+			batch_input[i] = seq_pos_to_1_hot(chr_seq[chr_indx],read_s-augmentation_value, read_e + augmentation_value,0)
+			batch_output[i] = y[read_number]
+
+			i+=1
+
+			if(i%batch_size == 0):
+				yield (batch_input, batch_output)
+				i=0
+				batch_input = np.zeros((batch_size, input_length, 4))
+				batch_output = np.zeros((batch_size,output_length))
+
+def generator_input_average_profile(x,chr_seq,augmentation_value,batch_size):
+	output_length = x[0,2] - x[0,1]
+	input_length = output_length+2*augmentation_value
+	batch_input = np.zeros((batch_size, input_length, 4))
+	i = 0
+	while True:
+		for read_number in range(len(x)): #The reads should have been shuffled prior to this operation!
+			chr_indx = x[read_number,0]
+			read_s = x[read_number,1]
+			read_e = x[read_number,2]
+			batch_input[i] = seq_pos_to_1_hot(chr_seq[chr_indx],read_s-augmentation_value, read_e + augmentation_value,0)
+			i+=1
+			if(i%batch_size == 0):
+				yield batch_input
+				i=0
+				batch_input = np.zeros((batch_size, input_length, 4))
+
 def break_reads_to_fixed_size(seq_pos,n_methyl,methyl_rel_pos,fixed_size):
 	n_samples = np.sum(np.floor((seq_pos[:,2]-seq_pos[:,1])/fixed_size).astype('int32'))
 	seq_pos_new = np.zeros((n_samples,4), dtype=int)
@@ -309,4 +407,37 @@ def split_training_testing(seq_pos,n_methyl,methyl_rel_pos,fraction_training):
 	methyl_rel_pos_testing = methyl_rel_pos[n_methyl[n_training]:]
 
 	return seq_pos_training,n_methyl_training,methyl_rel_pos_training, seq_pos_testing,n_methyl_testing,methyl_rel_pos_testing
+
+
+### Write the data to external files
+def average_profile_to_bedgraph_file(profile,chr_names,chr_seq, file_name):
+	header = 'track type=bedGraph name="BedGraph Format" description="BedGraph format" visibility=full color=200,100,0 altColor=0,100,200 priority=20\n'
+	f=open(file_name, 'w')
+	f.write(header)
+	counter = 0
+	for chr_idx in range(len(chr_names)):
+		for j in range(len(chr_seq[chr_idx])):
+			f.write(chr_names[chr_idx] + ' ' + str(j)+' '+str(j+1)+ ' '+str(profile[counter])+'\n')
+			counter +=1
+	f.close()
+
+def average_profile_to_wig_file(profile,chr_names,chr_seq, file_name):
+	f=open(file_name, 'w')
+	counter = 0
+	for chr_idx in range(len(chr_names)):
+		f.write('fixedStep chrom='+chr_names[chr_idx] +' start=1 step=1\n')
+		for j in range(len(chr_seq[chr_idx])):
+			f.write(str(profile[counter])+'\n')
+			counter +=1
+	f.close()
+
+def predictions_NN_to_wig_file(x,y,chr_names,file_name):
+	f=open(file_name, 'w')
+	for i in range(len(y)):
+		f.write('fixedStep chrom='+chr_names[x[i,0]] +' start='+ str(x[i,1])+' step=1\n')
+		for j in range(x[i,2] - x[i,1]):
+			f.write(str(y[i,j])+'\n')
+	f.close()
+
+
 

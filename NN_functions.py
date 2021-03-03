@@ -2,10 +2,10 @@
 import wandb
 from wandb.keras import WandbCallback
 import tensorflow as tf
-from util import generator_data
+from util import generator_data,generator_data_average_profile
 import numpy as np
 
-def Model(input_length, output_length,n_units_layer, n_layers, filter_1_size,filter_other_size,T_can_be_methyl = False):
+def Model(input_length, output_length,n_units_layer, n_layers, filter_1_size,filter_other_size,average_profile = False,T_can_be_methyl = False):
 	#Still need to add direct connexion input and output and fix weight
 	#Careful, filter_1_size must be an odd number!
 	s = int((input_length - output_length)/2)
@@ -28,14 +28,17 @@ def Model(input_length, output_length,n_units_layer, n_layers, filter_1_size,fil
 	#x = tf.keras.layers.Dense(output_length,activation="sigmoid")(x)
 	
 	x = tf.keras.layers.Reshape((-1, 1, n_units_layer))(x)
-	x = tf.keras.layers.Conv2DTranspose(1, kernel_size=(filter_1_size, 1), padding='same')(x)
+	x = tf.keras.layers.Conv2DTranspose(1, 
+		kernel_size=(filter_1_size, 1), 
+		padding='same')(x)
 	x = tf.keras.layers.Flatten()(x)
 	x = x[:,s:e]
 	x = tf.keras.activations.sigmoid(x)
 
-	inputs_potentially_methyl = inputs[:,s:e,0]
-	if T_can_be_methyl: inputs_potentially_methyl += inputs[:,s:e,1]
-	x = tf.keras.layers.Multiply()([inputs_potentially_methyl, x])
+	if not average_profile:
+		inputs_potentially_methyl = inputs[:,s:e,0]
+		if T_can_be_methyl: inputs_potentially_methyl += inputs[:,s:e,1]
+		x = tf.keras.layers.Multiply()([inputs_potentially_methyl, x])
 
 	model = tf.keras.Model(inputs, x)
 
@@ -147,3 +150,77 @@ def train(model,
 				   'acc': float(train_acc), 
 				   'val_loss': np.mean(val_loss),
 				   'val_acc':float(val_acc)})
+
+def train_on_average_profile(model,
+		optimizer,
+		loss_fn,
+		epochs,
+		batch_size,
+		x_train,
+		y_train,
+		x_val,
+		y_val,
+		chr_seq,
+		input_augmentation,
+		train_acc_metric,
+		val_acc_metric):
+
+	n_training_samples = len(x_train)
+	training_step_per_epoch = round(n_training_samples/batch_size)
+
+	n_val_samples = len(x_val)
+	val_step_per_epoch = round(n_val_samples/batch_size)
+
+	for epoch in range(epochs):
+		print("\nStart of epoch %d" % (epoch,))
+
+		train_loss = []   
+		val_loss = []
+
+		training_steps = 0
+		# Iterate over the batches of the dataset
+		for (x_batch_train, y_batch_train) in generator_data_average_profile(x_train,
+																			y_train,
+																			chr_seq,
+																			input_augmentation,
+																			batch_size):
+			loss_value = train_step(x_batch_train, y_batch_train, 
+									model, optimizer, 
+									loss_fn, train_acc_metric)
+			train_loss.append(float(loss_value))
+			training_steps+=1
+			if (training_steps%training_step_per_epoch == 0): break
+
+
+		# Run a validation loop at the end of each epoch
+		val_steps = 0
+		for (x_batch_val, y_batch_val) in generator_data_average_profile(x_val,
+																			y_val,
+																			chr_seq,
+																			input_augmentation,
+																			batch_size):
+			val_loss_value = test_step(x_batch_val, y_batch_val, 
+									   model, loss_fn, 
+									   val_acc_metric)
+			val_loss.append(float(val_loss_value))
+
+			val_steps+=1
+			if (val_steps%val_step_per_epoch == 0): break
+			
+		# Display metrics at the end of each epoch
+		train_acc = train_acc_metric.result()
+		print("training RMSE over epoch: %.4f" % (float(train_acc),))
+
+		val_acc = val_acc_metric.result()
+		print("Validation RMSE : %.4f" % (float(val_acc),))
+
+		# Reset metrics at the end of each epoch
+		train_acc_metric.reset_states()
+		val_acc_metric.reset_states()
+
+		# log metrics using wandb.log
+		wandb.log({'epochs': epoch,
+				   'loss': np.mean(train_loss),
+				   'RMSE': float(train_acc), 
+				   'val_loss': np.mean(val_loss),
+				   'val_RMSE':float(val_acc)})
